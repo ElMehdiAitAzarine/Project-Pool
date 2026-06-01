@@ -1548,8 +1548,8 @@ def manage_game_types(request):
         } for g in gtypes])
         
     if request.method == 'POST':
-        if not check_admin_role(request, "simple_admin"):
-            return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+        if not check_admin_role(request, "super_admin"):
+            return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         data = request.data
         gtype = GameType.objects.create(
             name=data.get('name'),
@@ -1568,8 +1568,8 @@ def manage_game_types(request):
 
 @api_view(['GET', 'PUT', 'DELETE'])
 def game_type_detail(request, pk):
-    if not check_admin_role(request, "simple_admin"):
-        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
     
     try:
         gtype = GameType.objects.get(pk=pk)
@@ -1610,8 +1610,8 @@ def game_type_detail(request, pk):
 
 @api_view(['GET', 'POST'])
 def manage_gaming_tables(request):
-    if not check_admin_role(request, "simple_admin"):
-        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         
     if request.method == 'GET':
         tables = GamingTable.objects.select_related('game_type').all().order_by('id_gamet')
@@ -1624,8 +1624,8 @@ def manage_gaming_tables(request):
             "game_type_name": t.game_type.name if t.game_type else None
         } for t in tables])
         
-    if not check_admin_role(request, "simple_admin"):
-        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         
     data = request.data
     gtype_id = data.get('game_type_id')
@@ -1646,8 +1646,8 @@ def manage_gaming_tables(request):
 
 @api_view(['GET', 'PUT', 'DELETE'])
 def gaming_table_detail(request, pk):
-    if not check_admin_role(request, "simple_admin"):
-        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         
     try:
         table = GamingTable.objects.get(pk=pk)
@@ -1664,8 +1664,8 @@ def gaming_table_detail(request, pk):
             "game_type_name": table.game_type.name if table.game_type else None
         })
         
-    if not check_admin_role(request, "simple_admin"):
-        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         
     if request.method == 'PUT':
         data = request.data
