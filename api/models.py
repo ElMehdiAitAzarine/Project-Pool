@@ -8,6 +8,7 @@ class Client(models.Model):
     email_cl = models.CharField(max_length=255, db_column='email_cl', unique=True, blank=True, null=True)
     password_hash = models.TextField(db_column='password_hash', blank=True, null=True)
     image_path = models.TextField(db_column='image_path', blank=True, null=True)
+    last_seen_at = models.DateTimeField(db_column='last_seen_at', blank=True, null=True)
 
     class Meta:
         db_table = 'client'
@@ -53,10 +54,23 @@ class DailyGameSession(models.Model):
     game_status = models.CharField(max_length=50, default='active') # active, canceled
     notified_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True, blank=True, null=True)
+    opponent = models.ForeignKey(Client, models.SET_NULL, blank=True, null=True, related_name='opponent_sessions')
+    winner = models.ForeignKey(Client, models.SET_NULL, blank=True, null=True, related_name='won_sessions')
 
     class Meta:
         db_table = 'daily_game_session'
         managed = True
+
+class PlayRequest(models.Model):
+    id = models.AutoField(primary_key=True)
+    sender = models.ForeignKey(Client, models.CASCADE, related_name='sent_requests')
+    receiver = models.ForeignKey(Client, models.CASCADE, related_name='received_requests')
+    game_table = models.ForeignKey(GamingTable, models.CASCADE)
+    status = models.CharField(max_length=50, default='pending') # pending, accepted, refused, expired
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'play_request'
 
 class Order(models.Model):
     id_order = models.AutoField(primary_key=True)
@@ -133,3 +147,25 @@ class Admin(models.Model):
 
     class Meta:
         db_table = 'admin_user'
+
+class SessionConfig(models.Model):
+    """Singleton configuration for session durations (in hours)."""
+    id = models.AutoField(primary_key=True)
+    admin_session_hours = models.FloatField(default=6.0)  # Admin panel session duration
+    screen_session_hours = models.FloatField(default=12.0)  # Screen display session duration
+    user_session_hours = models.FloatField(default=24.0)  # User/member session duration
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'session_config'
+        managed = True
+
+    @classmethod
+    def get_config(cls):
+        """Returns the singleton config, creating it with defaults if needed."""
+        config, _ = cls.objects.get_or_create(pk=1)
+        return config
+
+    def __str__(self):
+        return f"Session Config: Admin={self.admin_session_hours}h, Screen={self.screen_session_hours}h, User={self.user_session_hours}h"
+

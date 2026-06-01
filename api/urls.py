@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     path('daily-qr', views.get_daily_qr, name='daily_qr'),
     path('verify-scan', views.verify_scan, name='verify_scan'),
+    path('detect-qr', views.detect_qr, name='detect_qr'),
     path('signup', views.signup, name='signup'),
     path('login', views.login, name='login'),
     path('game-status', views.get_game_status, name='game_status'),
@@ -12,6 +13,7 @@ urlpatterns = [
     path('cancel-session', views.cancel_session, name='cancel_session'),
     path('confirm-play', views.confirm_play, name='confirm_play'),
     path('user-orders', views.get_user_orders, name='user_orders'),
+    path('user-game-history', views.get_user_game_history, name='user_game_history'),
     path('cancel-order', views.cancel_order, name='cancel_order'),
     path('cafe-tables', views.get_cafe_tables, name='cafe_tables'),
     path('occupy-cafe-table', views.occupy_cafe_table, name='occupy_cafe_table'),
@@ -19,6 +21,12 @@ urlpatterns = [
     path('get-profile', views.get_profile, name='get_profile'),
     path('update-profile', views.update_profile, name='update_profile'),
     path('guest-login', views.guest_login, name='guest_login'),
+    # Challenge Matchmaking
+    path('connected-players', views.get_connected_players, name='connected_players'),
+    path('send-play-request', views.send_play_request, name='send_play_request'),
+    path('poll-play-requests', views.poll_play_requests, name='poll_play_requests'),
+    path('respond-play-request', views.respond_play_request, name='respond_play_request'),
+    path('set-session-winner', views.set_session_winner, name='set_session_winner'),
     # Admin Panel Endpoints (using sys-admin to avoid conflict with django admin)
     path('sys-admin/login', views.admin_login, name='admin_login'),
     path('sys-admin/menu', views.manage_menu, name='manage_menu'),
@@ -37,6 +45,10 @@ urlpatterns = [
     path('sys-admin/history', views.get_master_history, name='master_history'),
     path('sys-admin/game-types', views.manage_game_types, name='manage_game_types'),
     path('sys-admin/game-types/<int:pk>', views.game_type_detail, name='game_type_detail'),
+    path('sys-admin/gaming-tables', views.manage_gaming_tables, name='manage_gaming_tables'),
+    path('sys-admin/gaming-tables/<int:pk>', views.gaming_table_detail, name='gaming_table_detail'),
     path('sys-admin/admins', views.manage_admins, name='manage_admins'),
     path('sys-admin/admins/<int:pk>', views.admin_detail, name='admin_detail'),
+    path('sys-admin/session-config', views.manage_session_config, name='session_config'),
+    path('validate-session', views.validate_session, name='validate_session'),
 ]

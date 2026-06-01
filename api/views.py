@@ -10,7 +10,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from passlib.context import CryptContext
-from .models import Client, GamingTable, DailyGameSession, Order, CafeTableOccupation, Menu, Waiter, FinancialRecord, GameType, Admin
+from .models import Client, GamingTable, DailyGameSession, Order, CafeTableOccupation, Menu, Waiter, FinancialRecord, GameType, Admin, SessionConfig
 from qr_logic import generate_daily_token, generate_qr_image
 
 # Use pbkdf2_sha256 to be consistent and avoid bcrypt limits
@@ -95,6 +95,86 @@ def verify_scan(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+def detect_qr(request):
+    """
+    Endpoint receives camera frames as base64 images from the frontend,
+    detects and decodes QR codes using pyzbar (lightweight, no GPU needed).
+    If valid, automatically authenticates the device.
+    """
+    import base64
+    from PIL import Image
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    import io
+    
+    data = request.data
+    image_b64 = data.get('image')
+    device_id = data.get('device_id')
+    
+    if not image_b64 or not device_id:
+        return Response({"detail": "Missing image or device_id"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    device_id = device_id.strip()
+    
+    # 1. Decode base64 image using PIL (no OpenCV needed)
+    try:
+        if ',' in image_b64:
+            image_b64 = image_b64.split(',')[1]
+        img_bytes = base64.b64decode(image_b64)
+        img = Image.open(io.BytesIO(img_bytes))
+    except Exception as e:
+        return Response({"detail": f"Failed to decode image: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    # 2. Decode QR codes using pyzbar
+    try:
+        decoded_results = pyzbar_decode(img)
+        
+        if not decoded_results:
+            return Response({"detail": "No QR code detected"}, status=status.HTTP_404_NOT_FOUND)
+            
+        decoded_text = decoded_results[0].data.decode('utf-8')
+        
+        if not decoded_text:
+            return Response({"detail": "QR code detected, but failed to decode"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            
+        # 3. Extract token from URL or raw text
+        token = decoded_text
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed_url = urlparse(decoded_text)
+            queries = parse_qs(parsed_url.query)
+            if 'token' in queries:
+                token = queries['token'][0]
+        except Exception:
+            pass
+            
+        # 4. Verify token against today's expected token
+        expected_token = generate_daily_token()
+        if token != expected_token:
+            return Response({"detail": "Invalid or expired QR code token"}, status=status.HTTP_403_FORBIDDEN)
+            
+        # 5. Find device in database
+        user = Client.objects.filter(device_id__iexact=device_id).first()
+        if user:
+            return Response({
+                "status": "logged_in",
+                "user": user.full_name_cl,
+                "id": user.id,
+                "token": token
+            })
+        else:
+            return Response({
+                "status": "unregistered",
+                "token": token
+            })
+            
+    except Exception as e:
+        import traceback
+        print(f"pyzbar QR processing failed: {traceback.format_exc()}")
+        return Response({"detail": f"QR scanning failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
 def login(request):
     """Manual login with phone and password."""
     data = request.data
@@ -102,26 +182,24 @@ def login(request):
     password = data.get('password')
     device_id = data.get('device_id')
     
+    if phone:
+        phone = phone.strip()
+
     if not phone or not password:
         return Response({"detail": "Phone and password required"}, status=status.HTTP_400_BAD_REQUEST)
         
-    # Updated Screen Authentication: must be an admin
-    admin_screen = Admin.objects.filter(username=phone).first()
-    if admin_screen and pwd_context.verify(hashlib.sha256(password.encode('utf-8')).hexdigest(), admin_screen.password_hash):
-        return Response({
-            "status": "success",
-            "id": -1,
-            "user": admin_screen.username,
-            "is_screen": True,
-            "admin_level": admin_screen.admin_level
-        })
+    # Block admin credentials from being used on the member login page.
+    # Admins must use the dedicated /sys-admin/login endpoint instead.
+    admin_account = Admin.objects.filter(username__iexact=phone).first()
+    if admin_account:
+        return Response({"detail": "Admin accounts cannot log in here. Please use the admin panel."}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         # Multi-identifier login: username (full_name_cl), phone, or email
         user = Client.objects.filter(
-            Q(full_name_cl=phone) | 
-            Q(phone_cl=phone) | 
-            Q(email_cl=phone)
+            Q(full_name_cl__iexact=phone) | 
+            Q(phone_cl__iexact=phone) | 
+            Q(email_cl__iexact=phone)
         ).first()
         
         if not user:
@@ -129,7 +207,19 @@ def login(request):
             
         # Verify password
         pw_to_check = hashlib.sha256(password.encode('utf-8')).hexdigest()
-        if not pwd_context.verify(pw_to_check, user.password_hash):
+        
+        is_valid = False
+        if user.password_hash:
+            try:
+                is_valid = pwd_context.verify(pw_to_check, user.password_hash)
+            except Exception:
+                pass
+            
+            # Fallback for plain text or pure SHA-256 legacy hashes
+            if not is_valid and (user.password_hash == pw_to_check or user.password_hash == password):
+                is_valid = True
+                
+        if not is_valid:
             return Response({"detail": "Incorrect password"}, status=status.HTTP_401_UNAUTHORIZED)
             
         # Optional: Link device if not already set or updated
@@ -146,10 +236,14 @@ def login(request):
             user.device_id = device_id
             user.save()
             
+        # Include session config for user session management
+        config = SessionConfig.get_config()
         return Response({
             "status": "success",
             "id": user.id,
-            "user": user.full_name_cl
+            "user": user.full_name_cl,
+            "login_timestamp": timezone.now().isoformat(),
+            "session_duration_hours": config.user_session_hours
         })
     except Exception as e:
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -185,6 +279,11 @@ def signup(request):
     password = data.get('password')
     device_id = data.get('device_id')
     photo = request.FILES.get('photo')
+
+    if phone:
+        phone = phone.strip()
+    if email:
+        email = email.strip()
 
     print(f"DEBUG: Signup request received for phone: {phone}")
     print(f"DEBUG: Device ID: {device_id}")
@@ -247,6 +346,14 @@ def get_game_status(request):
     today = timezone.now().date()
     now = timezone.now()
     
+    # Heartbeat update for connected client
+    client_id = request.query_params.get('client_id')
+    if client_id:
+        try:
+            Client.objects.filter(id=client_id).update(last_seen_at=now)
+        except Exception as e:
+            print("Heartbeat update failed:", e)
+
     # Process timeouts and next-in-line for each table
     for table in tables:
         # 1. Check for timeout on notified players
@@ -537,6 +644,256 @@ def confirm_play(request):
         return Response({"detail": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
 
 @api_view(['GET'])
+@permission_classes([AllowAny])
+def get_user_game_history(request):
+    """Returns past played games history for a specific user."""
+    client_id = request.query_params.get('client_id')
+    device_id = request.query_params.get('device_id')
+    
+    if not client_id:
+        return Response({"detail": "client_id required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        user = Client.objects.get(id=client_id)
+        # Security validation: make sure the device_id matches the user's linked device
+        if user.device_id and device_id and user.device_id != device_id:
+            return Response({"detail": "Unauthorized device"}, status=status.HTTP_403_FORBIDDEN)
+    except Client.DoesNotExist:
+        return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+    # Get all game sessions for this client
+    sessions = DailyGameSession.objects.filter(client=user).order_by('-created_at')
+    
+    return Response([{
+        "session_id": s.session_id,
+        "table_name": s.game_table.gamet_name if s.game_table else "TBD",
+        "game_type": s.game_table.game_type.name if s.game_table and s.game_table.game_type else "TBD",
+        "game_type_image": s.game_table.game_type.image_path if s.game_table and s.game_table.game_type else "",
+        "status": s.status,
+        "daily_number": s.daily_number,
+        "created_at": s.created_at,
+        "notified_at": s.notified_at,
+        "opponent": s.opponent.full_name_cl if s.opponent else None,
+    } for s in sessions])
+
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_connected_players(request):
+    client_id = request.query_params.get('client_id')
+    now = timezone.now()
+    fifteen_seconds_ago = now - timezone.timedelta(seconds=15)
+    
+    # Players active in the last 15 seconds (excluding the requesting client)
+    active_query = Client.objects.filter(last_seen_at__gte=fifteen_seconds_ago)
+    if client_id:
+        active_query = active_query.exclude(id=client_id)
+        
+    connected_players = list(active_query)
+    
+    # Categorize
+    idle = []
+    finishing = []
+    
+    today = now.date()
+    
+    for player in connected_players:
+        # Check if player is playing
+        active_session = DailyGameSession.objects.filter(
+            client=player,
+            status__in=['playing', 'notified'],
+            game_status='active',
+            created_at__date=today
+        ).first()
+        
+        if not active_session:
+            # Also check as opponent
+            active_session = DailyGameSession.objects.filter(
+                opponent=player,
+                status__in=['playing', 'notified'],
+                game_status='active',
+                created_at__date=today
+            ).first()
+            
+        if not active_session:
+            idle.append({
+                "id": player.id,
+                "full_name": player.full_name_cl or f"Player #{player.id}",
+            })
+        else:
+            # check if they've been playing for >15 minutes
+            is_finishing = False
+            if active_session.status == 'playing' and active_session.notified_at:
+                elapsed = (now - active_session.notified_at).total_seconds()
+                if elapsed > 900: # 15 minutes
+                    is_finishing = True
+                    
+            if is_finishing:
+                finishing.append({
+                    "id": player.id,
+                    "full_name": player.full_name_cl or f"Player #{player.id}",
+                })
+                
+    return Response({
+        "idle": idle,
+        "finishing": finishing
+    })
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_play_request(request):
+    sender_id = request.data.get('sender_id')
+    receiver_id = request.data.get('receiver_id')
+    table_id = request.data.get('table_id')
+    
+    if not sender_id or not receiver_id or not table_id:
+        return Response({"detail": "sender_id, receiver_id, and table_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        sender = Client.objects.get(id=sender_id)
+        receiver = Client.objects.get(id=receiver_id)
+        table = GamingTable.objects.get(id_gamet=table_id)
+        
+        # Check if there's already an active play request between them
+        existing = PlayRequest.objects.filter(
+            sender=sender,
+            receiver=receiver,
+            status='pending'
+        ).first()
+        
+        if existing:
+            # Auto-expire if older than 10 seconds
+            elapsed = (timezone.now() - existing.created_at).total_seconds()
+            if elapsed <= 10:
+                return Response({"detail": "A request is already pending to this player"}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                existing.status = 'expired'
+                existing.save()
+                
+        req = PlayRequest.objects.create(
+            sender=sender,
+            receiver=receiver,
+            game_table=table,
+            status='pending'
+        )
+        
+        return Response({"status": "success", "request_id": req.id})
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def poll_play_requests(request):
+    client_id = request.query_params.get('client_id')
+    if not client_id:
+        return Response({"detail": "client_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    now = timezone.now()
+    
+    # Expiry logic for pending requests
+    pending_requests = PlayRequest.objects.filter(receiver_id=client_id, status='pending')
+    
+    active_reqs = []
+    for req in pending_requests:
+        elapsed = (now - req.created_at).total_seconds()
+        if elapsed > 10:
+            req.status = 'expired'
+            req.save()
+        else:
+            active_reqs.append({
+                "id": req.id,
+                "sender_name": req.sender.full_name_cl or f"Player #{req.sender.id}",
+                "table_name": req.game_table.gamet_name,
+                "table_id": req.game_table.id_gamet,
+                "time_left": max(0, int(10 - elapsed))
+            })
+            
+    return Response(active_reqs)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def respond_play_request(request):
+    request_id = request.data.get('request_id')
+    response_val = request.data.get('response') # 'accepted' or 'refused'
+    
+    if not request_id or not response_val:
+        return Response({"detail": "request_id and response are required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        req = PlayRequest.objects.get(id=request_id)
+        
+        # Check expiry (10 seconds)
+        elapsed = (timezone.now() - req.created_at).total_seconds()
+        if elapsed > 10:
+            req.status = 'expired'
+            req.save()
+            return Response({"detail": "Request has expired"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if req.status != 'pending':
+            return Response({"detail": "Request already handled"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        req.status = response_val
+        req.save()
+        
+        if response_val == 'accepted':
+            today = timezone.now().date()
+            # 1. Cancel any active queues/playing sessions for both players to avoid overlaps
+            DailyGameSession.objects.filter(
+                client_id__in=[req.sender.id, req.receiver.id],
+                status__in=['waiting', 'notified', 'playing'],
+                created_at__date=today
+            ).update(status='completed')
+            
+            DailyGameSession.objects.filter(
+                opponent_id__in=[req.sender.id, req.receiver.id],
+                status__in=['waiting', 'notified', 'playing'],
+                created_at__date=today
+            ).update(status='completed')
+            
+            # 2. Create the multiplayer Game Session
+            session = DailyGameSession.objects.create(
+                client=req.sender,
+                opponent=req.receiver,
+                game_table=req.game_table,
+                status='playing',
+                daily_number=99,  # special number for match duels
+                notified_at=timezone.now()
+            )
+            return Response({"status": "success", "session_id": session.session_id})
+            
+        return Response({"status": "success", "message": "Request declined"})
+    except PlayRequest.DoesNotExist:
+        return Response({"detail": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def set_session_winner(request):
+    session_id = request.data.get('session_id')
+    winner_id = request.data.get('winner_id') # Can be client_id, opponent_id or None for draw
+    
+    if not session_id:
+        return Response({"detail": "session_id required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        session = DailyGameSession.objects.get(session_id=session_id)
+        if winner_id:
+            winner = Client.objects.get(id=winner_id)
+            session.winner = winner
+        else:
+            session.winner = None
+        session.save()
+        return Response({"status": "success"})
+    except DailyGameSession.DoesNotExist:
+        return Response({"detail": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Client.DoesNotExist:
+        return Response({"detail": "Winner player not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
 def get_user_orders(request):
     """Returns orders for a specific user."""
     client_id = request.query_params.get('client_id')
@@ -731,32 +1088,56 @@ def confirm_cafe_table(request):
         return Response({"detail": "Occupation not found"}, status=status.HTTP_404_NOT_FOUND)
 @api_view(['POST'])
 @permission_classes([AllowAny])
-@permission_classes([AllowAny])
 def admin_login(request):
     """Admin login with credentials from DB."""
-    username = request.data.get('username')
-    password = request.data.get('password')
-    
-    admin = Admin.objects.filter(username=username).first()
-    if admin:
-        # We expect double hashing on frontend for user login, but admin might be simpler or same
-        # Let's stay consistent: frontend sends plain password, we hash sha256 then verify with pbkdf2
-        pw_to_check = hashlib.sha256(password.encode('utf-8')).hexdigest()
-        if pwd_context.verify(pw_to_check, admin.password_hash):
-            return Response({
-                "status": "success",
-                "token": f"token-{admin.id}-{admin.admin_level}",
-                "user": admin.username,
-                "admin_level": admin.admin_level
-            })
+    try:
+        username = request.data.get('username')
+        password = request.data.get('password')
+        login_type = request.data.get('login_type', 'admin')  # 'admin' or 'screen'
+        
+        if username:
+            username = username.strip()
+        
+        if not username or not password:
+            return Response({"detail": "Username and password required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        admin = Admin.objects.filter(username__iexact=username).first()
+        if admin:
+            # We expect double hashing on frontend for user login, but admin might be simpler or same
+            # Let's stay consistent: frontend sends plain password, we hash sha256 then verify with pbkdf2
+            pw_to_check = hashlib.sha256(password.encode('utf-8')).hexdigest()
+            is_valid = False
             
-    return Response({"detail": "Access Denied: Invalid Credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+            if admin.password_hash:
+                try:
+                    is_valid = pwd_context.verify(pw_to_check, admin.password_hash)
+                except Exception:
+                    pass
+                
+                # Fallback for plain text or pure SHA-256 legacy hashes
+                if not is_valid and (admin.password_hash == pw_to_check or admin.password_hash == password):
+                    is_valid = True
+
+            if is_valid:
+                config = SessionConfig.get_config()
+                session_hours = config.screen_session_hours if login_type == 'screen' else config.admin_session_hours
+                return Response({
+                    "status": "success",
+                    "token": f"token-{admin.id}-{admin.admin_level}",
+                    "user": admin.username,
+                    "admin_level": admin.admin_level,
+                    "session_duration_hours": session_hours,
+                    "login_timestamp": timezone.now().isoformat()
+                })
+                
+        return Response({"detail": "Access Denied: Invalid Credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+    except Exception as e:
+        import traceback
+        print(f"admin_login error: {traceback.format_exc()}")
+        return Response({"detail": f"Login error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET', 'POST'])
 def manage_menu(request):
-    if not check_admin_role(request, "super_admin"):
-        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
-    
     if request.method == 'GET':
         items = Menu.objects.all().order_by('category', 'name')
         return Response([{
@@ -769,6 +1150,9 @@ def manage_menu(request):
             "is_available": i.is_available,
             "popularity": i.popularity
         } for i in items])
+        
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
     
     data = request.data
     item = Menu.objects.create(
@@ -1007,10 +1391,14 @@ def manage_sessions(request):
         return Response([{
             "id": s.session_id,
             "client": s.client.full_name_cl if s.client else "Unknown",
+            "client_id": s.client.id if s.client else None,
+            "opponent": s.opponent.full_name_cl if s.opponent else None,
+            "opponent_id": s.opponent.id if s.opponent else None,
             "table": s.game_table.gamet_name if s.game_table else "TBD",
             "status": s.status,
             "daily_number": s.daily_number,
-            "created_at": s.created_at
+            "created_at": s.created_at,
+            "winner": s.winner.full_name_cl if s.winner else None
         } for s in sessions])
     
     if request.method == 'POST':
@@ -1147,10 +1535,8 @@ def get_master_history(request):
     return Response(combined)
 
 @api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
 def manage_game_types(request):
-    if not check_admin_role(request, "super_admin"):
-        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
-    
     if request.method == 'GET':
         gtypes = GameType.objects.all().order_by('name')
         return Response([{
@@ -1160,8 +1546,10 @@ def manage_game_types(request):
             "station_count": g.station_count,
             "description": g.description
         } for g in gtypes])
-    
+        
     if request.method == 'POST':
+        if not check_admin_role(request, "super_admin"):
+            return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
         data = request.data
         gtype = GameType.objects.create(
             name=data.get('name'),
@@ -1219,6 +1607,88 @@ def game_type_detail(request, pk):
     if request.method == 'DELETE':
         gtype.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+@api_view(['GET', 'POST'])
+def manage_gaming_tables(request):
+    if not check_admin_role(request, "simple_admin"):
+        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+        
+    if request.method == 'GET':
+        tables = GamingTable.objects.select_related('game_type').all().order_by('id_gamet')
+        return Response([{
+            "id": t.id_gamet,
+            "name": t.gamet_name,
+            "number": t.gamet_number,
+            "club": t.gamet_club,
+            "game_type_id": t.game_type.id if t.game_type else None,
+            "game_type_name": t.game_type.name if t.game_type else None
+        } for t in tables])
+        
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+        
+    data = request.data
+    gtype_id = data.get('game_type_id')
+    gtype = None
+    if gtype_id:
+        try:
+            gtype = GameType.objects.get(pk=gtype_id)
+        except GameType.DoesNotExist:
+            return Response({"detail": "Game Type not found"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    table = GamingTable.objects.create(
+        gamet_name=data.get('name'),
+        gamet_number=int(data.get('number', 1)),
+        gamet_club=data.get('club', 'CueClub'),
+        game_type=gtype
+    )
+    return Response({"status": "success", "id": table.id_gamet})
+
+@api_view(['GET', 'PUT', 'DELETE'])
+def gaming_table_detail(request, pk):
+    if not check_admin_role(request, "simple_admin"):
+        return Response({"detail": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+        
+    try:
+        table = GamingTable.objects.get(pk=pk)
+    except GamingTable.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+        
+    if request.method == 'GET':
+        return Response({
+            "id": table.id_gamet,
+            "name": table.gamet_name,
+            "number": table.gamet_number,
+            "club": table.gamet_club,
+            "game_type_id": table.game_type.id if table.game_type else None,
+            "game_type_name": table.game_type.name if table.game_type else None
+        })
+        
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+        
+    if request.method == 'PUT':
+        data = request.data
+        table.gamet_name = data.get('name', table.gamet_name)
+        table.gamet_number = int(data.get('number', table.gamet_number))
+        table.gamet_club = data.get('club', table.gamet_club)
+        
+        gtype_id = data.get('game_type_id')
+        if gtype_id is not None:
+            if gtype_id == "":
+                table.game_type = None
+            else:
+                try:
+                    table.game_type = GameType.objects.get(pk=gtype_id)
+                except GameType.DoesNotExist:
+                    return Response({"detail": "Game Type not found"}, status=status.HTTP_400_BAD_REQUEST)
+        table.save()
+        return Response({"status": "updated"})
+        
+    if request.method == 'DELETE':
+        table.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 @api_view(['GET', 'POST'])
 def manage_admins(request):
     if not check_admin_role(request, "super_admin"):
@@ -1281,3 +1751,94 @@ def admin_detail(request, pk):
              return Response({"detail": "Cannot delete master admin"}, status=status.HTTP_400_BAD_REQUEST)
         admin.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+@api_view(['GET', 'PUT'])
+def manage_session_config(request):
+    """View or update session duration settings. Super admin only."""
+    if not check_admin_role(request, "super_admin"):
+        return Response({"detail": "Super Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    
+    config = SessionConfig.get_config()
+    
+    if request.method == 'GET':
+        return Response({
+            "admin_session_hours": config.admin_session_hours,
+            "screen_session_hours": config.screen_session_hours,
+            "user_session_hours": config.user_session_hours,
+            "updated_at": config.updated_at
+        })
+    
+    if request.method == 'PUT':
+        data = request.data
+        admin_hours = data.get('admin_session_hours')
+        screen_hours = data.get('screen_session_hours')
+        user_hours = data.get('user_session_hours')
+        
+        if admin_hours is not None:
+            admin_hours = float(admin_hours)
+            if admin_hours < 0.5 or admin_hours > 168:  # Min 30min, Max 1 week
+                return Response({"detail": "Admin session must be between 0.5 and 168 hours"}, status=status.HTTP_400_BAD_REQUEST)
+            config.admin_session_hours = admin_hours
+        
+        if screen_hours is not None:
+            screen_hours = float(screen_hours)
+            if screen_hours < 1 or screen_hours > 168:
+                return Response({"detail": "Screen session must be between 1 and 168 hours"}, status=status.HTTP_400_BAD_REQUEST)
+            config.screen_session_hours = screen_hours
+        
+        if user_hours is not None:
+            user_hours = float(user_hours)
+            if user_hours < 0.5 or user_hours > 168:
+                return Response({"detail": "User session must be between 0.5 and 168 hours"}, status=status.HTTP_400_BAD_REQUEST)
+            config.user_session_hours = user_hours
+        
+        config.save()
+        return Response({
+            "status": "success",
+            "admin_session_hours": config.admin_session_hours,
+            "screen_session_hours": config.screen_session_hours,
+            "user_session_hours": config.user_session_hours
+        })
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def validate_session(request):
+    """Validates if a session is still active based on login timestamp and configured duration."""
+    login_timestamp = request.data.get('login_timestamp')
+    session_type = request.data.get('session_type', 'admin')  # 'admin' or 'screen'
+    
+    if not login_timestamp:
+        return Response({"valid": False, "reason": "No login timestamp provided"})
+    
+    try:
+        from datetime import datetime
+        login_time = datetime.fromisoformat(login_timestamp)
+        if timezone.is_naive(login_time):
+            login_time = timezone.make_aware(login_time)
+        
+        config = SessionConfig.get_config()
+        if session_type == 'screen':
+            max_hours = config.screen_session_hours
+        elif session_type == 'user':
+            max_hours = config.user_session_hours
+        else:
+            max_hours = config.admin_session_hours
+        elapsed = (timezone.now() - login_time).total_seconds() / 3600
+        
+        if elapsed > max_hours:
+            return Response({
+                "valid": False,
+                "reason": "Session expired",
+                "elapsed_hours": round(elapsed, 2),
+                "max_hours": max_hours
+            })
+        
+        return Response({
+            "valid": True,
+            "remaining_hours": round(max_hours - elapsed, 2),
+            "max_hours": max_hours
+        })
+    except Exception as e:
+        return Response({"valid": False, "reason": str(e)})
+
+

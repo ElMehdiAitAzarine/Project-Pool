@@ -25,12 +25,12 @@ load_dotenv(BASE_DIR / '.env')
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-3&392%two9mxpjh3+sj)vs%m6)avm0yd#(*@%u$9yt_5p&=3j('
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-3&392%two9mxpjh3+sj)vs%m6)avm0yd#(*@%u$9yt_5p&=3j(')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = ['10.147.44.177', 'localhost', '127.0.0.1', '*']
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,10.147.44.177,*').split(',')
 
 APPEND_SLASH = False
 
@@ -81,21 +81,41 @@ TEMPLATES = [
 WSGI_APPLICATION = 'core_project.wsgi.application'
 
 
-# Database (MariaDB 11.4.10)
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'nuxe0125_CueClubDB', # Change with your ACTUAL MariaDB database name
-        'USER': 'nuxe0125_MehdiAitAzarine',           # Change with your ACTUAL MariaDB username
-        'PASSWORD': 'Mehdi-Ismail@007', # Change with your ACTUAL MariaDB password
-        'HOST': '127.0.0.1',           # Change if your MariaDB is not local
-        'PORT': '3306',                # MariaDB default port
-        'OPTIONS': {
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-            'charset': 'utf8mb4',
+# Database configuration
+DB_HOST = os.environ.get('DATABASE_HOST', '127.0.0.1')
+
+if 'database.windows.net' in DB_HOST:
+    # Azure SQL (MSSQL)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'mssql',
+            'NAME': os.environ.get('DATABASE_NAME', 'cueclubdb'),
+            'USER': os.environ.get('DATABASE_USER', 'admincueclub'),
+            'PASSWORD': os.environ.get('DATABASE_PASSWORD', ''),
+            'HOST': DB_HOST,
+            'PORT': os.environ.get('DATABASE_PORT', '1433'),
+            'OPTIONS': {
+                'driver': 'ODBC Driver 18 for SQL Server',
+                'extra_params': 'Encrypt=yes;TrustServerCertificate=no',
+            }
         }
     }
-}
+else:
+    # MariaDB / MySQL (Default)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.environ.get('DATABASE_NAME', 'nuxe0125_CueClubDB'),
+            'USER': os.environ.get('DATABASE_USER', 'nuxe0125_MehdiAitAzarine'),
+            'PASSWORD': os.environ.get('DATABASE_PASSWORD', 'Mehdi-Ismail@007'),
+            'HOST': DB_HOST,
+            'PORT': os.environ.get('DATABASE_PORT', '3306'),
+            'OPTIONS': {
+                'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+                'charset': 'utf8mb4',
+            }
+        }
+    }
 
 
 # Password validation
