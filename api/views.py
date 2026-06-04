@@ -11,7 +11,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from passlib.context import CryptContext
 from .models import Client, GamingTable, DailyGameSession, Order, CafeTableOccupation, Menu, Waiter, FinancialRecord, GameType, Admin, SessionConfig
-from qr_logic import generate_daily_token, generate_qr_image
 
 # Use pbkdf2_sha256 to be consistent and avoid bcrypt limits
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
@@ -36,141 +35,6 @@ def check_admin_role(request, required_level="super_admin"):
     except Admin.DoesNotExist:
         return False
 
-@api_view(['GET'])
-def get_daily_qr(request):
-    """Endpoint triggers the daily QR generation on the server."""
-    file_path = generate_qr_image()
-    return Response({
-        "status": "QR Generated Successfully",
-        "saved_path": file_path,
-        "token": generate_daily_token()
-    })
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def verify_scan(request):
-    """Verifies that the scan is valid and the device exists in the DB."""
-    data = request.data
-    device_id = data.get('device_id')
-    daily_token = data.get('daily_token')
-
-    if not device_id or not daily_token:
-        return Response({"detail": "Missing device_id or token"}, status=status.HTTP_400_BAD_REQUEST)
-
-    device_id = device_id.strip()
-
-    print(f"DEBUG: verify_scan called with device_id: '{device_id}'")
-    print(f"DEBUG: daily_token: '{daily_token[:10]}...'")
-
-    # 1. Validate the daily token
-    expected_token = generate_daily_token()
-    print(f"DEBUG: expected_token: '{expected_token[:10]}...'")
-    if daily_token != expected_token:
-        return Response({"detail": "Invalid/Expired QR Code"}, status=status.HTTP_403_FORBIDDEN)
-
-    # 2. Check the database for the device
-    try:
-        if device_id:
-            device_id = device_id.strip()
-        
-        print(f"DEBUG: Searching for device_id: '{device_id}'")
-        user = Client.objects.filter(device_id__iexact=device_id).first()
-        
-        if user:
-            print(f"DEBUG: Found user: {user.full_name_cl} (ID: {user.id})")
-            return Response({
-                "status": "logged_in",
-                "user": user.full_name_cl,
-                "id": user.id
-            })
-        else:
-            # Check if any partial matches or total count for debugging
-            count = Client.objects.count()
-            print(f"DEBUG: No user found for device_id: '{device_id}'. Total clients in DB: {count}")
-            return Response({"status": "unregistered", "message": "Take to signin page"})
-    except Exception as e:
-        import traceback
-        print(f"Error checking DB: {traceback.format_exc()}")
-        return Response({"detail": f"Database error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def detect_qr(request):
-    """
-    Endpoint receives camera frames as base64 images from the frontend,
-    detects and decodes QR codes using pyzbar (lightweight, no GPU needed).
-    If valid, automatically authenticates the device.
-    """
-    import base64
-    from PIL import Image
-    from pyzbar.pyzbar import decode as pyzbar_decode
-    import io
-    
-    data = request.data
-    image_b64 = data.get('image')
-    device_id = data.get('device_id')
-    
-    if not image_b64 or not device_id:
-        return Response({"detail": "Missing image or device_id"}, status=status.HTTP_400_BAD_REQUEST)
-        
-    device_id = device_id.strip()
-    
-    # 1. Decode base64 image using PIL (no OpenCV needed)
-    try:
-        if ',' in image_b64:
-            image_b64 = image_b64.split(',')[1]
-        img_bytes = base64.b64decode(image_b64)
-        img = Image.open(io.BytesIO(img_bytes))
-    except Exception as e:
-        return Response({"detail": f"Failed to decode image: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
-        
-    # 2. Decode QR codes using pyzbar
-    try:
-        decoded_results = pyzbar_decode(img)
-        
-        if not decoded_results:
-            return Response({"detail": "No QR code detected"}, status=status.HTTP_404_NOT_FOUND)
-            
-        decoded_text = decoded_results[0].data.decode('utf-8')
-        
-        if not decoded_text:
-            return Response({"detail": "QR code detected, but failed to decode"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-            
-        # 3. Extract token from URL or raw text
-        token = decoded_text
-        try:
-            from urllib.parse import urlparse, parse_qs
-            parsed_url = urlparse(decoded_text)
-            queries = parse_qs(parsed_url.query)
-            if 'token' in queries:
-                token = queries['token'][0]
-        except Exception:
-            pass
-            
-        # 4. Verify token against today's expected token
-        expected_token = generate_daily_token()
-        if token != expected_token:
-            return Response({"detail": "Invalid or expired QR code token"}, status=status.HTTP_403_FORBIDDEN)
-            
-        # 5. Find device in database
-        user = Client.objects.filter(device_id__iexact=device_id).first()
-        if user:
-            return Response({
-                "status": "logged_in",
-                "user": user.full_name_cl,
-                "id": user.id,
-                "token": token
-            })
-        else:
-            return Response({
-                "status": "unregistered",
-                "token": token
-            })
-            
-    except Exception as e:
-        import traceback
-        print(f"pyzbar QR processing failed: {traceback.format_exc()}")
-        return Response({"detail": f"QR scanning failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -180,7 +44,6 @@ def login(request):
     data = request.data
     phone = data.get('phone')
     password = data.get('password')
-    device_id = data.get('device_id')
     
     if phone:
         phone = phone.strip()
@@ -221,20 +84,6 @@ def login(request):
                 
         if not is_valid:
             return Response({"detail": "Incorrect password"}, status=status.HTTP_401_UNAUTHORIZED)
-            
-        # Optional: Link device if not already set or updated
-        if device_id and user.device_id != device_id:
-            # Check if this device_id is already used by someone else
-            existing = Client.objects.filter(device_id__iexact=device_id).exclude(id=user.id).first()
-            if existing:
-                # Device is owned by another account. 
-                # For now, we allow the login but don't link the device to this account 
-                # OR we could steal it. Let's steal it to satisfy "automatically link"
-                existing.device_id = None
-                existing.save()
-            
-            user.device_id = device_id
-            user.save()
             
         # Include session config for user session management
         config = SessionConfig.get_config()
@@ -277,7 +126,6 @@ def signup(request):
     phone = data.get('phone')
     email = data.get('email')
     password = data.get('password')
-    device_id = data.get('device_id')
     photo = request.FILES.get('photo')
 
     if phone:
@@ -286,10 +134,9 @@ def signup(request):
         email = email.strip()
 
     print(f"DEBUG: Signup request received for phone: {phone}")
-    print(f"DEBUG: Device ID: {device_id}")
     print(f"DEBUG: Photo present: {photo is not None}")
 
-    if not all([first_name, last_name, phone, password, device_id]):
+    if not all([first_name, last_name, phone, password]):
         return Response({"detail": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST)
 
     file_path = None
@@ -308,28 +155,19 @@ def signup(request):
         pw_to_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
         password_hash = pwd_context.hash(pw_to_hash)
         
-        if device_id:
-            device_id = device_id.strip()
-            
         # 2. Check for existing
         existing_phone = Client.objects.filter(phone_cl=phone).first()
         if existing_phone:
             print(f"DEBUG: Signup failed. Phone '{phone}' already exists for user '{existing_phone.full_name_cl}' (ID: {existing_phone.id})")
             return Response({"detail": "This phone number is already registered. Please log in instead."}, status=status.HTTP_400_BAD_REQUEST)
             
-        existing_device = Client.objects.filter(device_id__iexact=device_id).first()
-        if existing_device:
-            print(f"DEBUG: Signup failed. Device ID '{device_id}' already exists for user '{existing_device.full_name_cl}' (ID: {existing_device.id})")
-            return Response({"detail": "This device is already associated with an account. Try logging in."}, status=status.HTTP_400_BAD_REQUEST)
-
         # 3. Create
         new_client = Client.objects.create(
             full_name_cl=f"{first_name} {last_name}",
             phone_cl=phone,
             email_cl=email,
             password_hash=password_hash,
-            image_path=file_path,
-            device_id=device_id
+            image_path=file_path
         )
         print(f"DEBUG: Successfully created new client: {new_client.full_name_cl} (ID: {new_client.id})")
         return Response({"status": "success", "id": new_client.id, "message": "User registered successfully"})
@@ -648,16 +486,12 @@ def confirm_play(request):
 def get_user_game_history(request):
     """Returns past played games history for a specific user."""
     client_id = request.query_params.get('client_id')
-    device_id = request.query_params.get('device_id')
     
     if not client_id:
         return Response({"detail": "client_id required"}, status=status.HTTP_400_BAD_REQUEST)
         
     try:
         user = Client.objects.get(id=client_id)
-        # Security validation: make sure the device_id matches the user's linked device
-        if user.device_id and device_id and user.device_id != device_id:
-            return Response({"detail": "Unauthorized device"}, status=status.HTTP_403_FORBIDDEN)
     except Client.DoesNotExist:
         return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
         
@@ -931,8 +765,7 @@ def get_profile(request):
             "last_name": last_name,
             "phone": user.phone_cl,
             "email": user.email_cl,
-            "photo_path": user.image_path,
-            "device_id": user.device_id
+            "photo_path": user.image_path
         })
     except Client.DoesNotExist:
         return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1329,8 +1162,7 @@ def manage_clients(request):
             "id": c.id,
             "full_name": c.full_name_cl,
             "phone": c.phone_cl,
-            "email": c.email_cl,
-            "device_id": c.device_id
+            "email": c.email_cl
         } for c in clients])
     
     data = request.data
@@ -1345,7 +1177,6 @@ def manage_clients(request):
         full_name_cl=data.get('full_name'),
         phone_cl=data.get('phone'),
         email_cl=data.get('email'),
-        device_id=data.get('device_id'),
         password_hash=password_hash
     )
     return Response({"status": "success", "id": client.id})
@@ -1365,7 +1196,6 @@ def client_detail(request, pk):
         client.full_name_cl = data.get('full_name', client.full_name_cl)
         client.phone_cl = data.get('phone', client.phone_cl)
         client.email_cl = data.get('email', client.email_cl)
-        client.device_id = data.get('device_id', client.device_id)
         
         password = data.get('password')
         if password:

@@ -2,9 +2,6 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    path('daily-qr', views.get_daily_qr, name='daily_qr'),
-    path('verify-scan', views.verify_scan, name='verify_scan'),
-    path('detect-qr', views.detect_qr, name='detect_qr'),
     path('signup', views.signup, name='signup'),
     path('login', views.login, name='login'),
     path('game-status', views.get_game_status, name='game_status'),

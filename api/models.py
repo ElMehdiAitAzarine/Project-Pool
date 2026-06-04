@@ -3,7 +3,6 @@ from django.db import models
 class Client(models.Model):
     id = models.AutoField(primary_key=True, db_column='id_client')
     full_name_cl = models.CharField(max_length=255, db_column='full_name_cl', blank=True, null=True)
-    device_id = models.CharField(max_length=255, db_column='device_id', unique=True, blank=True, null=True)
     phone_cl = models.CharField(max_length=255, db_column='phone_cl', unique=True, blank=True, null=True)
     email_cl = models.CharField(max_length=255, db_column='email_cl', unique=True, blank=True, null=True)
     password_hash = models.TextField(db_column='password_hash', blank=True, null=True)
