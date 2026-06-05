@@ -20,6 +20,7 @@ urlpatterns = [
     path('guest-login', views.guest_login, name='guest_login'),
     # Challenge Matchmaking
     path('connected-players', views.get_connected_players, name='connected_players'),
+    path('debug-online', views.debug_online_status, name='debug_online_status'),
     path('send-play-request', views.send_play_request, name='send_play_request'),
     path('poll-play-requests', views.poll_play_requests, name='poll_play_requests'),
     path('respond-play-request', views.respond_play_request, name='respond_play_request'),

@@ -10,7 +10,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from passlib.context import CryptContext
-from .models import Client, GamingTable, DailyGameSession, Order, CafeTableOccupation, Menu, Waiter, FinancialRecord, GameType, Admin, SessionConfig
+from .models import Client, GamingTable, DailyGameSession, PlayRequest, Order, CafeTableOccupation, Menu, Waiter, FinancialRecord, GameType, Admin, SessionConfig
 
 # Use pbkdf2_sha256 to be consistent and avoid bcrypt limits
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
@@ -574,10 +574,53 @@ def get_connected_players(request):
         "finishing": finishing
     })
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def debug_online_status(request):
+    """Debug endpoint: Shows last_seen_at for all clients so you can inspect DB-level heartbeat state."""
+    now = timezone.now()
+    fifteen_seconds_ago = now - timezone.timedelta(seconds=15)
+    clients = Client.objects.all().order_by('-last_seen_at')
+    
+    client_data = []
+    for c in clients:
+        last_seen = c.last_seen_at
+        seconds_ago = None
+        is_online = False
+        
+        if last_seen:
+            # Handle naive vs aware datetimes (MSSQL may strip timezone)
+            if timezone.is_naive(last_seen):
+                last_seen_aware = timezone.make_aware(last_seen)
+            else:
+                last_seen_aware = last_seen
+            seconds_ago = round((now - last_seen_aware).total_seconds(), 1)
+            is_online = last_seen_aware >= fifteen_seconds_ago
+        
+        client_data.append({
+            "id": c.id,
+            "name": c.full_name_cl,
+            "last_seen_at_raw": str(last_seen),
+            "last_seen_at_type": type(last_seen).__name__ if last_seen else "NULL",
+            "seconds_ago": seconds_ago,
+            "is_online": is_online,
+        })
+    
+    return Response({
+        "server_now_utc": now.isoformat(),
+        "server_now_type": type(now).__name__,
+        "online_threshold": "15 seconds",
+        "threshold_cutoff": fifteen_seconds_ago.isoformat(),
+        "total_clients": len(client_data),
+        "online_count": sum(1 for c in client_data if c["is_online"]),
+        "clients": client_data
+    })
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def send_play_request(request):
     sender_id = request.data.get('sender_id')
+
     receiver_id = request.data.get('receiver_id')
     table_id = request.data.get('table_id')
     
